@@ -1,7 +1,7 @@
 module.exports = {
   siteMetadata: {
     title: 'Running page',
-    siteUrl: 'https://yihong.run',
+    siteUrl: 'https://run.abuqi.online',
     description: 'Personal site and blog',
   },
   plugins: [
