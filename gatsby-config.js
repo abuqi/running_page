@@ -60,4 +60,5 @@ module.exports = {
       },
     },
   ],
+  pathPrefix: `/running_page`,
 };
