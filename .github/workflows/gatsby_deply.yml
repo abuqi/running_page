@@ -8,6 +8,8 @@ on:
   push: # push的时候触发
     branches: # 那些分支需要触发
       - master
+  schedule:
+    - cron: "5 0 * * *"
 
 jobs:
   build:
