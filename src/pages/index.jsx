@@ -1,25 +1,27 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import Layout from 'src/components/Layout';
+import LocationStat from 'src/components/LocationStat';
+import RunMap from 'src/components/RunMap';
+import RunTable from 'src/components/RunTable';
 import SVGStat from 'src/components/SVGStat';
 import YearsStat from 'src/components/YearsStat';
-import LocationStat from 'src/components/LocationStat';
-import RunTable from 'src/components/RunTable';
-import RunMap from 'src/components/RunMap';
 import useActivities from 'src/hooks/useActivities';
-import {
-  titleForShow,
-  scrollToMap,
-  geoJsonForRuns,
-  filterCityRuns,
-  filterYearRuns,
-  filterTitleRuns,
-  filterAndSortRuns,
-  sortDateFunc,
-  getBoundsForGeoData,
-} from 'src/utils/utils';
+import useSiteMetadata from 'src/hooks/useSiteMetadata';
 import { IS_CHINESE } from 'src/utils/const';
+import {
+  filterAndSortRuns,
+  filterCityRuns,
+  filterTitleRuns,
+  filterYearRuns,
+  geoJsonForRuns,
+  getBoundsForGeoData,
+  scrollToMap,
+  sortDateFunc,
+  titleForShow,
+} from 'src/utils/utils';
 
-export default () => {
+const Index = () => {
+  const { siteTitle } = useSiteMetadata();
   const { activities, thisYear } = useActivities();
   const [year, setYear] = useState(thisYear);
   const [runIndex, setRunIndex] = useState(-1);
@@ -37,6 +39,7 @@ export default () => {
     height: 400,
     ...bounds,
   });
+
   const changeByItem = (item, name, func) => {
     scrollToMap();
     setActivity(filterAndSortRuns(activities, item, func, sortDateFunc));
@@ -47,6 +50,7 @@ export default () => {
   const changeYear = (y) => {
     // default year
     setYear(y);
+
     if (viewport.zoom > 3) {
       setViewport({
         width: '100%',
@@ -54,6 +58,7 @@ export default () => {
         ...bounds,
       });
     }
+
     changeByItem(y, 'Year', filterYearRuns);
     clearInterval(intervalId);
   };
@@ -76,7 +81,7 @@ export default () => {
   useEffect(() => {
     setViewport({
       width: '100%',
-      height: 400,
+      height: 500,
       ...bounds,
     });
   }, [geoData]);
@@ -90,6 +95,7 @@ export default () => {
       if (i >= runsNum) {
         clearInterval(id);
       }
+
       const tempRuns = runs.slice(0, i);
       setGeoData(geoJsonForRuns(tempRuns));
       i += sliceNume;
@@ -102,13 +108,16 @@ export default () => {
     if (year !== 'Total') {
       return;
     }
+
     let rectArr = document.querySelectorAll('rect');
+
     if (rectArr.length !== 0) {
       rectArr = Array.from(rectArr).slice(1);
     }
 
     rectArr.forEach((rect) => {
       const rectColor = rect.getAttribute('fill');
+
       // not run has no click event
       if (rectColor !== '#444444') {
         const runDate = rect.innerHTML;
@@ -130,9 +139,11 @@ export default () => {
       }
     });
     let polylineArr = document.querySelectorAll('polyline');
+
     if (polylineArr.length !== 0) {
       polylineArr = Array.from(polylineArr).slice(1);
     }
+
     // add picked runs svg event
     polylineArr.forEach((polyline) => {
       // not run has no click event
@@ -157,7 +168,9 @@ export default () => {
     <Layout>
       <div className="mb5">
         <div className="w-100">
-          <h1 className="f1 fw9 i">Running</h1>
+          <h1 className="f1 fw9 i">
+            <a href="/">{siteTitle}</a>
+          </h1>
         </div>
         {viewport.zoom <= 3 && IS_CHINESE ? (
           <LocationStat
@@ -177,7 +190,7 @@ export default () => {
             geoData={geoData}
             setViewport={setViewport}
             changeYear={changeYear}
-            thisYear={thisYear}
+            thisYear={year}
           />
           {year === 'Total' ? (
             <SVGStat />
@@ -196,3 +209,5 @@ export default () => {
     </Layout>
   );
 };
+
+export default Index;

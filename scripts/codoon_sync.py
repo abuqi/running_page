@@ -1,26 +1,21 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import argparse
+import base64
+import hashlib
+import hmac
 import json
 import os
 import time
+import urllib.parse
 from collections import namedtuple
 from datetime import datetime, timedelta
 
 import gpxpy
 import polyline
 import requests
-import hashlib
-import hmac
-import base64
-import urllib.parse
-
-from config import GPX_FOLDER, JSON_FILE, SQL_FILE
+from config import BASE_TIMEZONE, GPX_FOLDER, JSON_FILE, SQL_FILE, run_map, start_point
 from generator import Generator
 
-start_point = namedtuple("start_point", "lat lon")
-run_map = namedtuple("polyline", "summary_polyline")
+from utils import adjust_time_to_utc
 
 # device info
 user_agent = "CodoonSport(8.9.0 1170;Android 7;Sony XZ1)"
@@ -32,12 +27,15 @@ davinci = "0"
 basic_auth = "MDk5Y2NlMjhjMDVmNmMzOWFkNWUwNGU1MWVkNjA3MDQ6YzM5ZDNmYmVhMWU4NWJlY2VlNDFjMTk5N2FjZjBlMzY="
 client_id = "099cce28c05f6c39ad5e04e51ed60704"
 
-# for future use
+# for multi sports
 TYPE_DICT = {
     0: "Hike",
     1: "Run",
     2: "Ride",
 }
+
+# only for running sports, if you want others, please change the True to False
+IS_ONLY_RUN = True
 
 
 # decrypt from libencrypt.so Java_com_codoon_jni_JNIUtils_encryptHttpSignature
@@ -132,7 +130,9 @@ class CodoonAuth:
             r.headers["timestamp"] = timestamp
             if "refresh_token" in params:
                 r.headers["authorization"] = "Basic " + basic_auth
-                r.headers["content-type"] = "application/x-www-form-urlencode; charset=utf-8"
+                r.headers[
+                    "content-type"
+                ] = "application/x-www-form-urlencode; charset=utf-8"
             else:
                 r.headers["authorization"] = "Bearer " + self.token
                 r.headers["content-type"] = "application/json; charset=utf-8"
@@ -177,6 +177,8 @@ class Codoon:
             auth=self.auth.reload(params),
         )
         login_data = r.json()
+        if login_data.__contains__("status") and login_data["status"] == "Error":
+            raise Exception(login_data["description"])
         self.refresh_token = login_data["refresh_token"]
         self.token = login_data["access_token"]
         self.user_id = login_data["user_id"]
@@ -197,7 +199,10 @@ class Codoon:
             raise Exception("get runs records error")
 
         runs = r.json()["data"]["log_list"]
-        if r.json()["data"]["has_more"] == "true":
+        if IS_ONLY_RUN:
+            runs = [run for run in runs if run["sports_type"] == 1]
+        print(f"{len(runs)} runs to parse")
+        if r.json()["data"]["has_more"]:
             return runs + self.get_runs_records(page + 1)
         return runs
 
@@ -212,33 +217,39 @@ class Codoon:
             points = []
         return points
 
-    def parse_points_to_gpx(self, run_points_data, start_time, end_time, interval=5):
+    def parse_points_to_gpx(self, run_points_data):
+        def to_date(ts):
+            # TODO use https://docs.python.org/3/library/datetime.html#datetime.datetime.fromisoformat
+            # once we decide to move on to python v3.7+
+            ts_fmts = ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"]
+
+            for ts_fmt in ts_fmts:
+                try:
+                    # performance with using exceptions
+                    # shouldn't be an issue since it's an offline cmdline tool
+                    return datetime.strptime(ts, ts_fmt)
+                except ValueError:
+                    pass
+
+            raise ValueError(
+                f"cannot parse timestamp {ts} into date with fmts: {ts_fmts}"
+            )
+
         # TODO for now kind of same as `keep` maybe refactor later
         points_dict_list = []
-        i = 0
-        start_timestamp = self._gt(start_time).timestamp()
-        end_timestamp = self._gt(end_time).timestamp()
         for point in run_points_data[:-1]:
             points_dict = {
                 "latitude": point["latitude"],
                 "longitude": point["longitude"],
                 "elevation": point["elevation"],
-                "time": datetime.utcfromtimestamp(start_timestamp + interval * i),
+                "time": adjust_time_to_utc(to_date(point["time_stamp"]), BASE_TIMEZONE),
             }
-            i += 1
             points_dict_list.append(points_dict)
-        points_dict_list.append(
-            {
-                "latitude": run_points_data[-1]["latitude"],
-                "longitude": run_points_data[-1]["longitude"],
-                "elevation": run_points_data[-1]["elevation"],
-                "time": datetime.utcfromtimestamp(end_timestamp),
-            }
-        )
         gpx = gpxpy.gpx.GPX()
         gpx.nsmap["gpxtpx"] = "http://www.garmin.com/xmlschemas/TrackPointExtension/v1"
         gpx_track = gpxpy.gpx.GPXTrack()
         gpx_track.name = "gpx from codoon"
+        gpx_track.type = "Run"
         gpx.tracks.append(gpx_track)
 
         # Create first segment in our GPX track:
@@ -247,10 +258,10 @@ class Codoon:
         for p in points_dict_list:
             point = gpxpy.gpx.GPXTrackPoint(**p)
             gpx_segment.points.append(point)
-
         return gpx.to_xml()
 
     def get_single_run_record(self, route_id):
+        print(f"Get single run for codoon id {route_id}")
         payload = {
             "route_id": route_id,
         }
@@ -261,7 +272,6 @@ class Codoon:
         )
         if not r.ok:
             print(r)
-            print(r.json())
             raise Exception("get runs records error")
         data = r.json()
         return data
@@ -285,11 +295,12 @@ class Codoon:
         if with_gpx:
             # pass the track no points
             if str(log_id) not in old_gpx_ids and run_points_data:
-                gpx_data = self.parse_points_to_gpx(
-                    run_points_data, start_time, end_time
-                )
+                gpx_data = self.parse_points_to_gpx(run_points_data)
                 download_codoon_gpx(gpx_data, str(log_id))
+        heart_rate_dict = run_data.get("heart_rate")
         heart_rate = None
+        if heart_rate_dict:
+            heart_rate = sum(heart_rate_dict.values()) / len(heart_rate_dict)
 
         polyline_str = polyline.encode(latlng_data) if latlng_data else ""
         start_latlng = start_point(*latlng_data[0]) if latlng_data else None
@@ -298,7 +309,7 @@ class Codoon:
         location_country = None
         sport_type = run_data["sports_type"]
         # only support run now, if you want all type comments these two lines
-        if sport_type != 1:
+        if IS_ONLY_RUN and sport_type != 1:
             return
         cast_type = TYPE_DICT[sport_type] if sport_type in TYPE_DICT else sport_type
         d = {

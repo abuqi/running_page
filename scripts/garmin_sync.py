@@ -1,55 +1,68 @@
-# -*- coding: utf-8 -*-
 """
 Python 3 API wrapper for Garmin Connect to get your statistics.
 Copy most code from https://github.com/cyberjunky/python-garminconnect
 """
 
 import argparse
+import asyncio
+import json
 import logging
 import os
-import time
 import re
 import sys
+import time
 import traceback
-import asyncio
-import httpx
-import aiofiles
 
-from config import GPX_FOLDER, JSON_FILE, SQL_FILE, config
+import aiofiles
+import cloudscraper
+import httpx
+from config import GPX_FOLDER, JSON_FILE, SQL_FILE, TCX_FOLDER, config
+
 from utils import make_activities_file
 
 # logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
+FOLDER_DICT = {
+    "gpx": GPX_FOLDER,
+    "tcx": TCX_FOLDER,
+}
 
 TIME_OUT = httpx.Timeout(240.0, connect=360.0)
 GARMIN_COM_URL_DICT = {
     "BASE_URL": "https://connect.garmin.com",
     "SSO_URL_ORIGIN": "https://sso.garmin.com",
     "SSO_URL": "https://sso.garmin.com/sso",
-    "MODERN_URL": "https://connect.garmin.com/modern",
+    # "MODERN_URL": "https://connect.garmin.com/modern",
+    "MODERN_URL": "https://connect.garmin.com",
     "SIGNIN_URL": "https://sso.garmin.com/sso/signin",
     "CSS_URL": "https://static.garmincdn.com/com.garmin.connect/ui/css/gauth-custom-v1.2-min.css",
+    "UPLOAD_URL": "https://connect.garmin.com/modern/proxy/upload-service/upload/.gpx",
+    "ACTIVITY_URL": "https://connect.garmin.com/proxy/activity-service/activity/{activity_id}",
 }
 
 GARMIN_CN_URL_DICT = {
     "BASE_URL": "https://connect.garmin.cn",
     "SSO_URL_ORIGIN": "https://sso.garmin.com",
     "SSO_URL": "https://sso.garmin.cn/sso",
-    "MODERN_URL": "https://connect.garmin.cn/modern",
+    # "MODERN_URL": "https://connect.garmin.cn/modern",
+    "MODERN_URL": "https://connect.garmin.cn",
     "SIGNIN_URL": "https://sso.garmin.cn/sso/signin",
     "CSS_URL": "https://static.garmincdn.cn/cn.garmin.connect/ui/css/gauth-custom-v1.2-min.css",
+    "UPLOAD_URL": "https://connect.garmin.cn/modern/proxy/upload-service/upload/.gpx",
+    "ACTIVITY_URL": "https://connect.garmin.cn/proxy/activity-service/activity/{activity_id}",
 }
 
 
 class Garmin:
-    def __init__(self, email, password, auth_domain):
+    def __init__(self, email, password, auth_domain, is_only_running=False):
         """
         Init module
         """
         self.email = email
         self.password = password
         self.req = httpx.AsyncClient(timeout=TIME_OUT)
+        self.cf_req = cloudscraper.CloudScraper()
         self.URL_DICT = (
             GARMIN_CN_URL_DICT
             if auth_domain and str(auth_domain).upper() == "CN"
@@ -61,8 +74,12 @@ class Garmin:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.88 Safari/537.36",
             "origin": self.URL_DICT.get("SSO_URL_ORIGIN"),
         }
+        self.is_only_running = is_only_running
+        self.upload_url = self.URL_DICT.get("UPLOAD_URL")
+        self.activity_url = self.URL_DICT.get("ACTIVITY_URL")
+        self.is_login = False
 
-    async def login(self):
+    def login(self):
         """
         Login to portal
         """
@@ -99,32 +116,30 @@ class Garmin:
         }
 
         try:
-            response = await self.req.post(
+            self.cf_req.get(
+                self.URL_DICT.get("SIGNIN_URL"), headers=self.headers, params=params
+            )
+            response = self.cf_req.post(
                 self.URL_DICT.get("SIGNIN_URL"),
                 headers=self.headers,
                 params=params,
                 data=data,
             )
-            if response.status_code == 429:
-                raise GarminConnectTooManyRequestsError("Too many requests")
-            response.raise_for_status()
-            logger.debug("Login response code %s", response.status_code)
-            text = response.text
         except Exception as err:
             raise GarminConnectConnectionError("Error connecting") from err
-
-        # logger.debug("Response is %s", text)
-        response_url = re.search(r'"(https:[^"]+?ticket=[^"]+)"', text)
+        response_url = re.search(r'"(https:[^"]+?ticket=[^"]+)"', response.text)
 
         if not response_url:
             raise GarminConnectAuthenticationError("Authentication error")
 
         response_url = re.sub(r"\\", "", response_url.group(1))
         try:
-            response = await self.req.get(response_url)
+            response = self.cf_req.get(response_url)
+            self.req.cookies = self.cf_req.cookies
             if response.status_code == 429:
                 raise GarminConnectTooManyRequestsError("Too many requests")
             response.raise_for_status()
+            self.is_login = True
         except Exception as err:
             raise GarminConnectConnectionError("Error connecting") from err
 
@@ -151,22 +166,58 @@ class Garmin:
                     "Exception occurred during data retrieval - perhaps session expired - trying relogin: %s"
                     % err
                 )
-                await self.login()
+                self.login()
                 await self.fetch_data(url, retrying=True)
 
     async def get_activities(self, start, limit):
         """
         Fetch available activities
         """
+        if not self.is_login:
+            self.login()
         url = f"{self.modern_url}/proxy/activitylist-service/activities/search/activities?start={start}&limit={limit}"
+        if self.is_only_running:
+            url = url + "&activityType=running"
         return await self.fetch_data(url)
 
-    async def download_activity(self, activity_id):
-        url = f"{self.modern_url}/proxy/download-service/export/gpx/activity/{activity_id}"
+    async def download_activity(self, activity_id, file_type="gpx"):
+        url = f"{self.modern_url}/proxy/download-service/export/{file_type}/activity/{activity_id}"
         logger.info(f"Download activity from {url}")
         response = await self.req.get(url, headers=self.headers)
         response.raise_for_status()
         return response.read()
+
+    async def upload_activities(self, files):
+        if not self.is_login:
+            self.login()
+        for file, garmin_type in files:
+            files = {"data": ("file.gpx", file)}
+            try:
+                res = await self.req.post(
+                    self.upload_url, files=files, headers={"nk": "NT"}
+                )
+            except Exception as e:
+                print(str(e))
+                # just pass for now
+                continue
+            try:
+                resp = res.json()["detailedImportResult"]
+            except Exception as e:
+                print(e)
+                raise Exception("failed to upload")
+            # change the type
+            if resp["successes"]:
+                activity_id = resp["successes"][0]["internalId"]
+                print(f"id {activity_id} uploaded...")
+                data = {"activityTypeDTO": {"typeKey": garmin_type}}
+                encoding_headers = {"Content-Type": "application/json; charset=UTF-8"}
+                r = await self.req.put(
+                    self.activity_url.format(activity_id=activity_id),
+                    data=json.dumps(data),
+                    headers=encoding_headers,
+                )
+                r.raise_for_status()
+        await self.req.aclose()
 
 
 class GarminConnectHttpError(Exception):
@@ -202,16 +253,16 @@ class GarminConnectAuthenticationError(Exception):
         self.status = status
 
 
-async def download_garmin_gpx(client, activity_id):
+async def download_garmin_data(client, activity_id, file_type="gpx"):
+    folder = FOLDER_DICT.get(file_type, "gpx")
     try:
-        gpx_data = await client.download_activity(activity_id)
-        file_path = os.path.join(GPX_FOLDER, f"{activity_id}.gpx")
+        file_data = await client.download_activity(activity_id, file_type=file_type)
+        file_path = os.path.join(folder, f"{activity_id}.{file_type}")
         async with aiofiles.open(file_path, "wb") as fb:
-            await fb.write(gpx_data)
+            await fb.write(file_data)
     except:
         print(f"Failed to download activity {activity_id}: ")
         traceback.print_exc()
-        pass
 
 
 async def get_activity_id_list(client, start=0):
@@ -242,7 +293,21 @@ if __name__ == "__main__":
         "--is-cn",
         dest="is_cn",
         action="store_true",
-        help="if garmin accout is com",
+        help="if garmin accout is cn",
+    )
+    parser.add_argument(
+        "--only-run",
+        dest="only_run",
+        action="store_true",
+        help="if is only for running",
+    )
+    parser.add_argument(
+        "--tcx",
+        dest="download_file_type",
+        action="store_const",
+        const="tcx",
+        default="gpx",
+        help="to download personal documents or ebook",
     )
     options = parser.parse_args()
     email = options.email or config("sync", "garmin", "email")
@@ -250,33 +315,43 @@ if __name__ == "__main__":
     auth_domain = (
         "CN" if options.is_cn else config("sync", "garmin", "authentication_domain")
     )
+    is_only_running = options.only_run
     if email == None or password == None:
         print("Missing argument nor valid configuration file")
         sys.exit(1)
-
+    folder = FOLDER_DICT.get(options.download_file_type, "gpx")
     # make gpx dir
-    if not os.path.exists(GPX_FOLDER):
-        os.mkdir(GPX_FOLDER)
+    if not os.path.exists(folder):
+        os.mkdir(folder)
 
     async def download_new_activities():
-        client = Garmin(email, password, auth_domain)
-        await client.login()
+        client = Garmin(email, password, auth_domain, is_only_running)
+        client.login()
 
         # because I don't find a para for after time, so I use garmin-id as filename
         # to find new run to generage
         downloaded_ids = [
-            i.split(".")[0] for i in os.listdir(GPX_FOLDER) if not i.startswith(".")
+            i.split(".")[0] for i in os.listdir(folder) if not i.startswith(".")
         ]
         activity_ids = await get_activity_id_list(client)
         to_generate_garmin_ids = list(set(activity_ids) - set(downloaded_ids))
         print(f"{len(to_generate_garmin_ids)} new activities to be downloaded")
 
         start_time = time.time()
+        file_type = options.download_file_type
         await gather_with_concurrency(
-            10, [download_garmin_gpx(client, id) for id in to_generate_garmin_ids]
+            10,
+            [
+                download_garmin_data(client, id, file_type=file_type)
+                for id in to_generate_garmin_ids
+            ],
         )
         print(f"Download finished. Elapsed {time.time()-start_time} seconds")
-        make_activities_file(SQL_FILE, GPX_FOLDER, JSON_FILE)
+
+        make_activities_file(
+            SQL_FILE, folder, JSON_FILE, file_suffix=options.download_file_type
+        )
+        await client.req.aclose()
 
     loop = asyncio.get_event_loop()
     future = asyncio.ensure_future(download_new_activities())
