@@ -101,12 +101,8 @@ jobs:
           python scripts/gen_svg.py --from-db --title "${{ env.TITLE_GRID }}" --type grid --athlete "${{ env.ATHLETE }}"  --output assets/grid.svg --min-distance 10.0 --special-color yellow --special-color2 red --special-distance 20 --special-distance2 40 --use-localtime
           python scripts/gen_svg.py --from-db --type circular --use-localtime
           
-      - name: Fix issue with repository ownership
-        run: |
-          git config --global --add safe.directory /github/workspace
-
       - name: Push new runs
-        uses: github-actions-x/commit@v2.6
+        uses: github-actions-x/commit@v2.9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: "Add new runs"
